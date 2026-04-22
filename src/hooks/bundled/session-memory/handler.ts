@@ -25,6 +25,7 @@ import { resolveHookConfig } from "../../config.js";
 import type { HookHandler } from "../../hooks.js";
 import { generateSlugViaLLM } from "../../llm-slug-generator.js";
 import { findPreviousSessionFile, getRecentSessionContentWithResetFallback } from "./transcript.js";
+import { sanitizeAssistantContent } from "./sanitize.js";
 
 const log = createSubsystemLogger("hooks/session-memory");
 
@@ -249,7 +250,21 @@ const saveSessionToMemory: HookHandler = async (event) => {
 
     // Include conversation content if available
     if (sessionContent) {
-      entryParts.push("## Conversation Summary", "", sessionContent, "");
+      // Defense in depth: strip chat-template tokens and raw tool_call XML in
+      // case a future caller bypasses the transcript-layer sanitization. The
+      // per-turn elision has already happened in transcript.ts; this pass just
+      // catches any residual leaked tokens on otherwise-legit turns.
+      const defensive = sanitizeAssistantContent(sessionContent);
+      if (defensive.strippedRatio > 0) {
+        log.debug("session-memory: defensive sanitization stripped residue", {
+          originalLength: defensive.originalLength,
+          strippedRatio: defensive.strippedRatio,
+        });
+      }
+      const safeSessionContent = defensive.skipped ? "" : defensive.text;
+      if (safeSessionContent.length > 0) {
+        entryParts.push("## Conversation Summary", "", safeSessionContent, "");
+      }
     }
 
     const entry = entryParts.join("\n");
